@@ -94,6 +94,38 @@ export class SorobanResurrect {
     this.server = new SorobanRpc.Server(this.config.rpcUrl, serverOptions)
   }
 
+  /**
+   * Register a listener for a transaction lifecycle event.
+   * Returns `this` for chaining.
+   */
+  on<K extends keyof SorobanResurrectEvents>(event: K, listener: SorobanResurrectEvents[K]): this {
+    if (!this.listeners[event]) {
+      this.listeners[event] = new Set() as Set<SorobanResurrectEvents[K]>
+    }
+    ;(this.listeners[event] as Set<SorobanResurrectEvents[K]>).add(listener)
+    return this
+  }
+
+  /**
+   * Remove a previously registered listener.
+   * Returns `this` for chaining.
+   */
+  off<K extends keyof SorobanResurrectEvents>(event: K, listener: SorobanResurrectEvents[K]): this {
+    (this.listeners[event] as Set<SorobanResurrectEvents[K]> | undefined)?.delete(listener)
+    return this
+  }
+
+  private emit<K extends keyof SorobanResurrectEvents>(
+    event: K,
+    ...args: Parameters<SorobanResurrectEvents[K]>
+  ): void {
+    const set = this.listeners[event] as Set<SorobanResurrectEvents[K]> | undefined
+    if (!set) return
+    for (const listener of set) {
+      (listener as (...a: Parameters<SorobanResurrectEvents[K]>) => void)(...args)
+    }
+  }
+
   private log(level: 'info' | 'warn' | 'error', message: string, data?: unknown): void {
     this.config.onLog(level, message, data)
   }
@@ -302,7 +334,13 @@ export class SorobanResurrect {
       this.log('info', `Splitting restore into ${batches.length} batches (${archivedKeys.length} total keys)`)
     }
 
+    this.emit('restore:start', archivedKeys)
+
     const result = await this.buildSingleRestoreTransaction(batches[0], sourceAccountID)
+
+    this.emit('restore:batch:complete', 0, batches.length)
+    this.emit('restore:complete', result)
+
     return result
   }
 
@@ -884,6 +922,8 @@ export class SorobanResurrect {
         err,
         { rpcUrl: this.config.rpcUrl, txHash: restoreTxHash },
       )
+      this.emit('error', resurrErr)
+      throw resurrErr
     }
 
     // Execute original transaction (may need to re-wrap if it was fee-bump)
@@ -904,6 +944,7 @@ export class SorobanResurrect {
       this.log('info', 'Executing original transaction')
       originalTxHash = await this.submitSignedTransaction(txToSubmit, signTransaction)
       this.log('info', `Original transaction confirmed: ${originalTxHash}`)
+      this.emit('original:complete', originalTxHash)
     } catch (err) {
       throw new SorobanResurrectError(
         `Original transaction failed after successful restore (rpcUrl=${this.config.rpcUrl}, restoreTxHash=${restoreTxHash}): ${err instanceof Error ? err.message : String(err)}`,
@@ -911,6 +952,8 @@ export class SorobanResurrect {
         err,
         { rpcUrl: this.config.rpcUrl, txHash: restoreTxHash },
       )
+      this.emit('error', resurrErr)
+      throw resurrErr
     }
 
     let keysRestored = 0
