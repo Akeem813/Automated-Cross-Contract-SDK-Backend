@@ -23,6 +23,18 @@ export interface SorobanResurrectConfig {
   onLog?: (level: 'info' | 'warn' | 'error', message: string, data?: unknown) => void
 }
 
+/**
+ * A group of archived keys that all belong to the same contract (or share no
+ * contract affiliation). Keys within a group must be restored together because
+ * they may depend on each other. Groups across different contracts are
+ * independent and can be restored concurrently.
+ */
+export interface ContractKeyGroup {
+  /** Hex contract ID, or '__unknown__' for keys without a contractId */
+  contractId: string
+  keys: ArchivedKey[]
+}
+
 export interface SimulationCheckResult {
   needsRestoration: boolean
   archivedKeys: ArchivedKey[]
@@ -48,6 +60,8 @@ export interface ExecutionResult {
   entriesRestored: number
   simulateOnly?: boolean
   error?: string
+  batchResults?: RestoreAllBatchesResult
+  concurrentBatchResults?: ConcurrentRestoreResult
 }
 
 export interface PreFlightConfig {
