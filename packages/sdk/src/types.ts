@@ -1,4 +1,6 @@
 import { xdr } from '@stellar/stellar-sdk'
+import type { RetryPolicy } from './retry-policy.js'
+import type { SimulationCacheConfig } from './simulation-cache.js'
 
 export interface ArchivedKey {
   key: xdr.LedgerKey
@@ -32,11 +34,19 @@ export interface RestoreTransactionResult {
   keysRestored: number
 }
 
+export interface FeeBumpMetadata {
+  isFeeBump: boolean
+  innerTransactionXDR?: string
+  feeAccountID?: string
+  feeBumpFee?: string
+}
+
 export interface ExecutionResult {
   success: boolean
   restoreTxHash?: string
   originalTxHash?: string
   entriesRestored: number
+  simulateOnly?: boolean
   error?: string
 }
 
