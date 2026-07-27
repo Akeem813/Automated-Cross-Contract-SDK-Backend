@@ -131,6 +131,20 @@ export class SorobanResurrect {
     this.config.onLog(level, message, data)
   }
 
+  /**
+   * Returns a cached `SorobanRpc.Server` for the given URL (or the current
+   * active endpoint when no URL is supplied).
+   */
+  private getServer(url?: string): SorobanRpc.Server {
+    const targetUrl = url ?? this.failoverManager.getCurrentUrl()
+    let server = this.serverCache.get(targetUrl)
+    if (!server) {
+      server = new SorobanRpc.Server(targetUrl, { allowHttp: this.config.allowHttp })
+      this.serverCache.set(targetUrl, server)
+    }
+    return server
+  }
+
   private async retryOnFailure<T>(fn: () => Promise<T>, context: string): Promise<T> {
     let lastError: SorobanResurrectError | undefined
     const policy = this.config.retryPolicy
@@ -270,7 +284,7 @@ export class SorobanResurrect {
     let existingKeys: SorobanRpc.Api.GetLedgerEntriesResponse
     try {
       existingKeys = await this.retryOnFailure(
-        () => this.server.getLedgerEntries(...keys.all),
+        () => this.getServer().getLedgerEntries(...keys.all),
         'getLedgerEntries',
       )
     } catch (err) {
@@ -781,7 +795,7 @@ export class SorobanResurrect {
     sourceAccountID: string,
   ): Promise<RestoreTransactionResult> {
     const sourceAccount = await this.retryOnFailure(
-      () => this.server.getAccount(sourceAccountID),
+      () => this.getServer().getAccount(sourceAccountID),
       `getAccount(${sourceAccountID})`,
     )
 
@@ -1047,7 +1061,7 @@ export class SorobanResurrect {
     const tx = new Transaction(signedXDR, this.config.networkPassphrase)
 
     const sendResult = await this.retryOnFailure(
-      () => this.server.sendTransaction(tx),
+      () => this.getServer().sendTransaction(tx),
       'sendTransaction',
     )
 
@@ -1264,7 +1278,7 @@ export class SorobanResurrect {
 
   private async pollForReceipt(hash: string, maxAttempts = 30): Promise<string> {
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      const receipt = await this.server.getTransaction(hash)
+      const receipt = await this.getServer().getTransaction(hash)
       if (receipt.status !== 'NOT_FOUND') {
         if (receipt.status === 'SUCCESS') {
           return hash
@@ -1345,6 +1359,21 @@ export class SorobanResurrect {
   }
 
   getRpcServer(): SorobanRpc.Server {
-    return this.server
+    return this.getServer()
+  }
+
+  /**
+   * Returns a snapshot of the health status for all configured RPC endpoints.
+   */
+  getFailoverStatus(): RpcEndpointHealth[] {
+    return this.failoverManager.getHealthStatus()
+  }
+
+  /**
+   * Stops background health checks and frees resources.
+   * Call this when you are done with the SDK instance.
+   */
+  destroy(): void {
+    this.failoverManager.destroy()
   }
 }

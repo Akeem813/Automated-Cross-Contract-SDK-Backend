@@ -39,3 +39,6 @@ export {
 export type { SimulationCacheConfig, CacheStatistics } from './simulation-cache.js'
 
 export { VERSION } from './version.js'
+
+export { RpcFailoverManager } from './rpc-failover.js'
+export type { RpcEndpointHealth, RpcFailoverConfig } from './rpc-failover.js'

@@ -63,7 +63,8 @@ export interface ArchivedKey {
 }
 
 export interface SorobanResurrectConfig {
-  rpcUrl: string
+  /** Single RPC URL or an ordered list of fallback URLs */
+  rpcUrl: string | string[]
   networkPassphrase: string
   allowHttp?: boolean
   restoreFee?: string
