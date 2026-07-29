@@ -75,6 +75,14 @@ type SimulationCacheEntry = {
 
 const CACHE_TTL_MS = 30_000
 
+const IDLE_PROGRESS: RestoreProgress = {
+  status: 'idle',
+  currentBatch: 0,
+  totalBatches: 0,
+  keysRestored: 0,
+  totalKeys: 0,
+}
+
 async function hashTxXDR(txXDR: string): Promise<string> {
   const cryptoObj = typeof globalThis !== 'undefined' ? (globalThis as any).crypto : undefined
   if (cryptoObj?.subtle?.digest) {
@@ -95,6 +103,7 @@ export function useSorobanResurrect<TSigner extends SigningStrategy = SigningStr
 ): UseSorobanResurrectReturn<TSigner> {
   const clientRef = useRef<SorobanResurrect | null>(null)
   const simulationCacheRef = useRef<Map<string, SimulationCacheEntry>>(new Map())
+  const abortControllerRef = useRef<AbortController | null>(null)
 
   const [isChecking, setIsChecking] = useState(false)
   const [isExecuting, setIsExecuting] = useState(false)
@@ -102,6 +111,8 @@ export function useSorobanResurrect<TSigner extends SigningStrategy = SigningStr
   const [error, setError] = useState<string | null>(null)
   const [needsRestore, setNeedsRestore] = useState(false)
   const [archivedKeys, setArchivedKeys] = useState<ArchivedKey[]>([])
+  const [isOptimistic, setIsOptimistic] = useState(false)
+  const [progress, setProgress] = useState<RestoreProgress>(IDLE_PROGRESS)
 
   const historyStorageKey = options.persistHistory
     ? (typeof options.persistHistory === 'string' ? options.persistHistory : DEFAULT_HISTORY_STORAGE_KEY)
@@ -141,9 +152,11 @@ export function useSorobanResurrect<TSigner extends SigningStrategy = SigningStr
       networkPassphrase: options.networkPassphrase,
       allowHttp: options.allowHttp,
       timeout: options.timeout,
+      pollIntervalMs: options.pollIntervalMs,
+      maxPollAttempts: options.maxPollAttempts,
       onLog,
     }),
-    [options.rpcUrl, options.networkPassphrase, options.allowHttp, options.timeout, onLog],
+    [options.rpcUrl, options.networkPassphrase, options.allowHttp, options.timeout, options.pollIntervalMs, options.maxPollAttempts, onLog],
   )
 
   // Re-instantiate SorobanResurrect only when the memoized config changes
@@ -215,6 +228,10 @@ export function useSorobanResurrect<TSigner extends SigningStrategy = SigningStr
     }
   }, [getClient, options])
 
+  const abort = useCallback(() => {
+    abortControllerRef.current?.abort()
+  }, [])
+
   const executeWithRestore = useCallback(async (
     txXDR: string,
     signTransaction?: (xdr: string) => Promise<string>,
@@ -230,10 +247,22 @@ export function useSorobanResurrect<TSigner extends SigningStrategy = SigningStr
     const startedAt = Date.now()
     setIsExecuting(true)
     setError(null)
-    try {
-      const client = getClient()
+    setProgress({ ...IDLE_PROGRESS, status: 'checking' })
 
+    const client = getClient()
+    let listeners: Array<[string, (...args: any[]) => void]> = []
+    const addListener = (event: string, listener: (...args: any[]) => void) => {
+      listeners.push([event, listener])
+      ;(client as any).on(event, listener)
+    }
+    const removeListeners = () => {
+      for (const [event, listener] of listeners) (client as any).off(event, listener)
+      listeners = []
+    }
+
+    try {
       const simulation = await getCachedSimulation(txXDR, forceRefresh)
+      throwIfAborted()
 
       if (!simulation.needsRestoration) {
         const signedXDR = await sign(txXDR)
@@ -244,6 +273,7 @@ export function useSorobanResurrect<TSigner extends SigningStrategy = SigningStr
           entriesRestored: 0,
         }
         setLastResult(result)
+        setProgress(p => ({ ...p, status: 'done' }))
         options.preFlight?.onRestoreComplete?.(result)
         addHistoryRecord({
           id: generateId(),
@@ -260,11 +290,48 @@ export function useSorobanResurrect<TSigner extends SigningStrategy = SigningStr
       setArchivedKeys(simulation.archivedKeys)
       options.preFlight?.onRestoreNeeded?.(simulation.archivedKeys)
 
+      setProgress({
+        status: 'restoring',
+        currentBatch: 0,
+        totalBatches: 0,
+        keysRestored: 0,
+        totalKeys: simulation.archivedKeys.length,
+      })
+
+      if (optimisticEnabled) {
+        setLastResult({
+          success: true,
+          entriesRestored: simulation.archivedKeys.length,
+        })
+        setIsOptimistic(true)
+      }
+
+      const batchStartTime = Date.now()
+      addListener('restore:batch:complete', (batchIndex: number, totalBatches: number) => {
+        const completed = batchIndex + 1
+        const elapsed = Date.now() - batchStartTime
+        const avgPerBatch = elapsed / completed
+        const remainingBatches = Math.max(totalBatches - completed, 0)
+        setProgress(p => ({
+          ...p,
+          currentBatch: completed,
+          totalBatches,
+          estimatedTimeRemainingMs: Math.round(avgPerBatch * remainingBatches),
+        }))
+      })
+      addListener('restore:complete', (result: { keysRestored: number }) => {
+        setProgress(p => ({ ...p, keysRestored: result.keysRestored }))
+      })
+      addListener('original:start', () => {
+        setProgress(p => ({ ...p, status: 'submitting', estimatedTimeRemainingMs: 0 }))
+      })
+
       const accountID = parseSource(txXDR, options.networkPassphrase)
       const restoreTx = await client.buildRestoreTransaction(
         simulation.archivedKeys,
         accountID,
       )
+      throwIfAborted()
 
       const result = await client.executeRestoreThenOriginal(
         restoreTx.transactionXDR,
@@ -274,8 +341,11 @@ export function useSorobanResurrect<TSigner extends SigningStrategy = SigningStr
           return signed
         },
       )
+      throwIfAborted()
 
       setLastResult(result)
+      setIsOptimistic(false)
+      setProgress(p => ({ ...p, status: 'done', keysRestored: restoreTx.keysRestored }))
       options.preFlight?.onRestoreComplete?.(result)
       addHistoryRecord({
         id: generateId(),
@@ -289,8 +359,20 @@ export function useSorobanResurrect<TSigner extends SigningStrategy = SigningStr
       })
       return result
     } catch (err) {
+      const aborted = err instanceof SorobanResurrectError && err.code === 'ABORTED'
       const message = err instanceof Error ? err.message : String(err)
       setError(message)
+      setProgress(p => ({ ...p, status: 'error' }))
+
+      if (optimisticEnabled) {
+        setLastResult(prevLastResult)
+        setIsOptimistic(false)
+      }
+      if (aborted) {
+        setNeedsRestore(prevNeedsRestore)
+        setArchivedKeys(prevArchivedKeys)
+      }
+
       const error = err instanceof Error ? err : new Error(message)
       options.onError?.(error)
       options.preFlight?.onError?.(error)
@@ -305,6 +387,8 @@ export function useSorobanResurrect<TSigner extends SigningStrategy = SigningStr
       if (err instanceof SorobanResurrectError) throw err
       throw new SorobanResurrectError(message, 'ORIGINAL_TX_FAILED', err)
     } finally {
+      removeListeners()
+      if (abortControllerRef.current === controller) abortControllerRef.current = null
       setIsExecuting(false)
     }
   }, [getClient, options, addHistoryRecord, archivedKeys])
@@ -316,6 +400,8 @@ export function useSorobanResurrect<TSigner extends SigningStrategy = SigningStr
     setError(null)
     setNeedsRestore(false)
     setArchivedKeys([])
+    setIsOptimistic(false)
+    setProgress(IDLE_PROGRESS)
   }, [])
 
   return {
