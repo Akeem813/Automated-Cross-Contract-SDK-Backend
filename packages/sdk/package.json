@@ -47,6 +47,8 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "test:integration": "vitest run --config vitest.integration.ts",
+    "test:property": "vitest run tests/property",
+    "test:fuzz": "jazzer tests/fuzz/xdr-parsing.fuzz.ts --fuzz_function=fuzz -- -max_total_time=60",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -73,7 +75,9 @@
     "@ledgerhq/hw-transport-webusb": { "optional": true }
   },
   "devDependencies": {
+    "@jazzer.js/core": "^2.1.0",
     "@vitest/coverage-v8": "^2.0.0",
+    "fast-check": "^3.19.0",
     "tsup": "^8.3.0",
     "vitest": "^2.0.0"
   },
