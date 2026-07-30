@@ -27,6 +27,7 @@ import {
 import {
   FootprintKeys,
   extractKeysFromFootprint,
+  extractFootprintFromTransaction,
   classifyDeferredKeys,
   encodeLedgerKey,
 } from './footprint-parser.js'
@@ -111,6 +112,11 @@ export class SorobanResurrect {
     this.failoverManager = new RpcFailoverManager(
       Array.isArray(this.config.rpcUrl) ? this.config.rpcUrl : [this.config.rpcUrl],
     )
+
+    // Initialize footprint cache when configured
+    if (this.config.footprintCache) {
+      this.footprintCache = new FootprintCache(this.config.footprintCache)
+    }
 
     void this.validateNetworkPassphrase()
   }
@@ -1420,6 +1426,81 @@ export class SorobanResurrect {
       return null
     }
     return this.simulationCache.getStatistics()
+  }
+
+  /**
+   * Parse a transaction XDR and extract its footprint keys, with caching.
+   *
+   * When a `footprintCache` is configured, the result is stored keyed by the
+   * SHA-256 hash of the XDR string.  Subsequent calls with the same XDR will
+   * return the cached result instantly, avoiding redundant CPU-heavy XDR
+   * deserialization.
+   *
+   * Cache entries are **not** time-bounded — they are invalidated only when
+   * `invalidateFootprintCache()` / `onLedgerClose()` is called, because
+   * footprint keys derived from a transaction XDR are deterministic and do
+   * not change across ledgers.
+   */
+  extractFootprintCached(txXDR: string): FootprintKeys | null {
+    if (this.footprintCache) {
+      const cached = this.footprintCache.get(txXDR)
+      if (cached !== undefined) {
+        return cached
+      }
+    }
+
+    const result = extractFootprintFromTransaction(txXDR, this.config.networkPassphrase)
+
+    if (this.footprintCache) {
+      this.footprintCache.set(txXDR, result)
+    }
+
+    return result
+  }
+
+  /**
+   * Invalidate **all** entries in the footprint cache.
+   *
+   * Call this whenever the ledger closes (i.e. a new ledger sequence is
+   * available) to ensure that subsequent calls to `extractFootprintCached`
+   * do not serve stale data.  Cached footprint keys are only valid for the
+   * current ledger.
+   */
+  onLedgerClose(): void {
+    if (this.footprintCache) {
+      this.footprintCache.invalidateAll()
+      this.log('info', 'Footprint cache invalidated (ledger close)')
+    }
+  }
+
+  /**
+   * Invalidate the footprint cache entry for a specific transaction XDR.
+   * Pass no arguments to invalidate the entire cache.
+   */
+  invalidateFootprintCache(txXDR?: string): void {
+    if (!this.footprintCache) {
+      this.log('warn', 'Footprint cache is not enabled')
+      return
+    }
+
+    if (txXDR) {
+      this.footprintCache.invalidate(txXDR)
+      this.log('info', 'Invalidated footprint cache for specific transaction')
+    } else {
+      this.footprintCache.invalidateAll()
+      this.log('info', 'Cleared all footprint cache entries')
+    }
+  }
+
+  /**
+   * Get footprint cache statistics.
+   * Returns `null` when the cache is not enabled.
+   */
+  getFootprintCacheStats(): FootprintCacheStatistics | null {
+    if (!this.footprintCache) {
+      return null
+    }
+    return this.footprintCache.getStatistics()
   }
 
   getRpcServer(): SorobanRpc.Server {
