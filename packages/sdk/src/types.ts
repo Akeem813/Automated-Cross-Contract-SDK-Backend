@@ -215,6 +215,39 @@ export interface ExecutionResult {
   error?: string
   batchResults?: RestoreAllBatchesResult
   concurrentBatchResults?: ConcurrentRestoreResult
+  /**
+   * Index of the first batch that failed during a multi-batch restore (0-based).
+   * Populated when a restore fails partway through; undefined on full success.
+   */
+  failedBatchIndex?: number
+  /**
+   * Number of entries that were successfully restored before the failure.
+   * Differs from `entriesRestored` when a partial failure occurred.
+   */
+  partialEntriesRestored?: number
+}
+
+/**
+ * Captured state from a partially-failed multi-batch restore, returned by
+ * `getFailedKeys()` and consumed by `retryFailedRestore()`.
+ */
+export interface FailedRestoreState {
+  /** The source account that was used for the original restore attempt. */
+  sourceAccountID: string
+  /**
+   * Batches that were not successfully submitted (status !== 'success').
+   * These are the exact `RestoreBatchResult` objects that need to be retried.
+   */
+  failedBatches: RestoreBatchResult[]
+  /**
+   * Keys that remain unrestored — flattened from all failed batches.
+   * Useful for reporting and logging purposes.
+   */
+  failedKeys: ArchivedKey[]
+  /** Zero-based index of the first batch that failed. */
+  failedBatchIndex: number
+  /** Number of entries that were successfully restored before the failure. */
+  partialEntriesRestored: number
 }
 
 export interface PreFlightConfig {
