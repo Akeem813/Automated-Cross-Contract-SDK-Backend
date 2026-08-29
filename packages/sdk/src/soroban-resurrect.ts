@@ -25,6 +25,7 @@ import {
   WsTransactionStatusEvent,
   TransactionWaitResult,
 } from './types.js'
+import { NOOP_LOGGER, onLogToLogger, type Logger } from './logger.js'
 import {
   FootprintKeys,
   extractKeysFromFootprint,
@@ -78,25 +79,36 @@ function extractInnerTransaction(tx: any): any {
 
 export class SorobanResurrect {
   private server: SorobanRpc.Server
-  private config: Required<Omit<SorobanResurrectConfig, 'timeout'>> & { timeout?: number }
+  private config: Required<Omit<SorobanResurrectConfig, 'timeout' | 'logger' | 'onLog'>> & {
+    timeout?: number
+    logger: Logger
+    onLog?: (level: 'info' | 'warn' | 'error', message: string, data?: unknown) => void
+  }
   private listeners: Record<string, Set<any>> = {}
   private failoverManager!: RpcFailoverManager
   private serverCache: Map<string, SorobanRpc.Server> = new Map()
   private simulationCache?: SimulationCache
 
   constructor(config: SorobanResurrectConfig) {
+    const legacyOnLog = config.onLog
+    const resolvedLogger = config.logger ?? (legacyOnLog ? onLogToLogger(legacyOnLog) : NOOP_LOGGER)
+
     this.config = {
       allowHttp: false,
       restoreFee: DEFAULT_RESTORE_FEE,
       maxRestoreBatchSize: 50,
       simulateOnly: false,
       retryPolicy: new ExponentialBackoff(3, 500),
-      onLog: () => {},
+      logger: resolvedLogger,
+      onLog: legacyOnLog,
       useWebSocket: false,
       pollIntervalMs: 1000,
       maxPollAttempts: 30,
       ...config,
     }
+
+    this.config.logger = this.config.logger ?? resolvedLogger
+    this.config.onLog = this.config.onLog ?? legacyOnLog
 
     const serverOptions: SorobanRpc.Server.Options = {
       allowHttp: this.config.allowHttp,
@@ -137,14 +149,16 @@ export class SorobanResurrect {
         if (this.config.strictNetworkValidation) {
           throw new SorobanResurrectError(message, 'NETWORK_ERROR', undefined, { rpcUrl })
         }
-        this.config.onLog('warn', message)
+        this.log('warn', message, { rpcUrl })
       }
     } catch (err) {
       if (err instanceof SorobanResurrectError) {
-        this.config.onLog('error', err.message)
+        this.log('error', err.message, { rpcUrl: Array.isArray(this.config.rpcUrl) ? this.config.rpcUrl[0] : this.config.rpcUrl })
         throw err
       }
-      this.config.onLog('warn', `Failed to validate network passphrase: ${err instanceof Error ? err.message : String(err)}`)
+      this.log('warn', `Failed to validate network passphrase: ${err instanceof Error ? err.message : String(err)}`, {
+        rpcUrl: Array.isArray(this.config.rpcUrl) ? this.config.rpcUrl[0] : this.config.rpcUrl,
+      })
     }
   }
 
@@ -181,7 +195,18 @@ export class SorobanResurrect {
   }
 
   private log(level: 'info' | 'warn' | 'error', message: string, data?: unknown): void {
-    this.config.onLog(level, message, data)
+    const logger = this.config.logger ?? NOOP_LOGGER
+    switch (level) {
+      case 'info':
+        logger.info(message, data as Record<string, unknown> | undefined)
+        break
+      case 'warn':
+        logger.warn(message, data as Record<string, unknown> | undefined)
+        break
+      case 'error':
+        logger.error(message, data as Record<string, unknown> | undefined)
+        break
+    }
   }
 
   /**

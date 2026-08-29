@@ -63,6 +63,8 @@ export interface ArchivedKey {
   restorePriority: RestorePriority
 }
 
+import type { Logger } from './logger.js'
+
 export interface SorobanResurrectConfig {
   /** Single RPC URL or an ordered list of fallback URLs */
   rpcUrl: string | string[]
@@ -75,6 +77,16 @@ export interface SorobanResurrectConfig {
    * Defaults to the Stellar SDK default when not set.
    */
   timeout?: number
+  /**
+   * Structured logger used throughout the SDK. Any object providing `info`,
+   * `warn`, `error`, and `debug` methods can be used here.
+   */
+  logger?: Logger
+  /**
+   * Legacy callback kept for backwards compatibility.
+   *
+   * Prefer `logger` for new integrations. When both are present, `logger` wins.
+   */
   onLog?: (level: 'info' | 'warn' | 'error', message: string, data?: unknown) => void
   /**
    * When `true`, the SDK attempts to subscribe to transaction status updates

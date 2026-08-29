@@ -1,5 +1,11 @@
 export { SorobanResurrect } from './soroban-resurrect.js'
 export {
+  NOOP_LOGGER,
+  consoleLogger,
+  onLogToLogger,
+} from './logger.js'
+export type { Logger } from './logger.js'
+export {
   extractKeysFromFootprint,
   classifyLedgerKey,
   classifySacKey,
