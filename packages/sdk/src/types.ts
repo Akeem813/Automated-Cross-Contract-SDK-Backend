@@ -109,6 +109,55 @@ export interface SorobanResurrectConfig {
    * entries when a new ledger closes.
    */
   footprintCache?: FootprintCacheConfig
+  /**
+   * Structured logger instance. Any object that implements the `Logger`
+   * interface (pino, winston, bunyan, console) can be passed here.
+   *
+   * Takes precedence over the legacy `onLog` callback when both are provided.
+   *
+   * @example pino
+   * ```ts
+   * import pino from 'pino';
+   * new SorobanResurrect({ logger: pino({ level: 'info' }) });
+   * ```
+   *
+   * @example console (no extra deps)
+   * ```ts
+   * import { consoleLogger } from '@soroban-resurrect/sdk';
+   * new SorobanResurrect({ logger: consoleLogger() });
+   * ```
+   */
+  logger?: import('./logger.js').Logger
+  /**
+   * OpenTelemetry configuration.
+   * When provided, the SDK creates spans for all major operations and
+   * injects trace context into outbound RPC calls.
+   *
+   * @example
+   * ```ts
+   * import { trace, propagation } from '@opentelemetry/api';
+   * new SorobanResurrect({
+   *   telemetry: {
+   *     tracer: trace.getTracer('@soroban-resurrect/sdk'),
+   *     propagator: propagation,
+   *   },
+   * });
+   * ```
+   */
+  telemetry?: import('./telemetry.js').TelemetryConfig
+  /**
+   * Prometheus metrics configuration.
+   * When provided, the SDK collects counters and histograms for restore
+   * operations. Call `resurrect.collectMetrics()` to render the text output.
+   *
+   * @example
+   * ```ts
+   * const resurrect = new SorobanResurrect({ metrics: {} });
+   * // later…
+   * res.end(resurrect.collectMetrics());
+   * ```
+   */
+  metrics?: import('./metrics.js').MetricsConfig
 }
 
 /**
