@@ -72,3 +72,7 @@ export {
 export type { WalletConnectAdapterConfig, WalletMetadata } from './walletconnect-adapter.js'
 export { LedgerAdapter } from './ledger-adapter.js'
 export type { LedgerAdapterConfig } from './ledger-adapter.js'
+
+/** OpenTelemetry instrumentation */
+export { SdkTelemetry, SpanStatus } from './telemetry.js'
+export type { TelemetryConfig, OtelTracer, OtelSpan, OtelPropagator } from './telemetry.js'

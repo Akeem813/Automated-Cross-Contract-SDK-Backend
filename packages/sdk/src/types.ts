@@ -109,6 +109,23 @@ export interface SorobanResurrectConfig {
    * entries when a new ledger closes.
    */
   footprintCache?: FootprintCacheConfig
+  /**
+   * OpenTelemetry configuration.
+   * When provided, the SDK creates spans for all major operations and
+   * injects trace context into outbound RPC calls.
+   *
+   * @example
+   * ```ts
+   * import { trace, propagation } from '@opentelemetry/api';
+   * new SorobanResurrect({
+   *   telemetry: {
+   *     tracer: trace.getTracer('@soroban-resurrect/sdk'),
+   *     propagator: propagation,
+   *   },
+   * });
+   * ```
+   */
+  telemetry?: import('./telemetry.js').TelemetryConfig
 }
 
 /**
