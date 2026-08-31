@@ -89,3 +89,6 @@ export {
 export type { WalletConnectAdapterConfig, WalletMetadata } from './walletconnect-adapter.js'
 export { LedgerAdapter } from './ledger-adapter.js'
 export type { LedgerAdapterConfig } from './ledger-adapter.js'
+
+/** Lightweight dependency injection container */
+export { Container, Token, BindingBuilder, ContainerError } from './container.js'
