@@ -29,7 +29,24 @@ export type {
   FailedRestoreState,
   PreFlightConfig,
   FeeBumpMetadata,
+  SimulationDiff,
+  LedgerEntryDiff,
+  TtlChange,
 } from './types.js'
+
+export {
+  Tracer,
+  Span,
+  parseTraceparent,
+  formatTraceparent,
+  resolveParentContext,
+} from './tracing.js'
+export type {
+  TraceContext,
+  TracingConfig,
+  SpanData,
+  SpanExporter,
+} from './tracing.js'
 export {
   ExponentialBackoff,
   FixedDelay,
@@ -73,19 +90,5 @@ export type { WalletConnectAdapterConfig, WalletMetadata } from './walletconnect
 export { LedgerAdapter } from './ledger-adapter.js'
 export type { LedgerAdapterConfig } from './ledger-adapter.js'
 
-// ─── New in this release ────────────────────────────────────────────────────
-
 /** Lightweight dependency injection container */
 export { Container, Token, BindingBuilder, ContainerError } from './container.js'
-
-/** Structured logging interface and built-in implementations */
-export { NOOP_LOGGER, consoleLogger, onLogToLogger } from './logger.js'
-export type { Logger } from './logger.js'
-
-/** OpenTelemetry instrumentation */
-export { SdkTelemetry, SpanStatus } from './telemetry.js'
-export type { TelemetryConfig, OtelTracer, OtelSpan, OtelPropagator } from './telemetry.js'
-
-/** Prometheus-compatible metrics */
-export { MetricsRegistry, SdkMetrics } from './metrics.js'
-export type { MetricsConfig } from './metrics.js'
