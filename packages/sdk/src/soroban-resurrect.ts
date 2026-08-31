@@ -151,14 +151,16 @@ export class SorobanResurrect {
         if (this.config.strictNetworkValidation) {
           throw new SorobanResurrectError(message, 'NETWORK_ERROR', undefined, { rpcUrl })
         }
-        this.config.onLog('warn', message)
+        this.logger.warn(message, { rpcUrl })
       }
     } catch (err) {
       if (err instanceof SorobanResurrectError) {
-        this.config.onLog('error', err.message)
+        this.logger.error(err.message, { code: err.code })
         throw err
       }
-      this.config.onLog('warn', `Failed to validate network passphrase: ${err instanceof Error ? err.message : String(err)}`)
+      this.logger.warn(
+        `Failed to validate network passphrase: ${err instanceof Error ? err.message : String(err)}`,
+      )
     }
   }
 
@@ -194,8 +196,8 @@ export class SorobanResurrect {
     }
   }
 
-  private log(level: 'info' | 'warn' | 'error', message: string, data?: unknown): void {
-    this.config.onLog(level, message, data)
+  private log(level: 'info' | 'warn' | 'error' | 'debug', message: string, meta?: Record<string, unknown>): void {
+    this.logger[level](message, meta)
   }
 
   /**
@@ -292,39 +294,41 @@ export class SorobanResurrect {
   }
 
   async simulate(txXDR: string, source?: string): Promise<SimulationCheckResult> {
-    // Check cache first if enabled
-    if (this.simulationCache) {
-      const cacheKey = SimulationCache.generateKey(txXDR, source)
-      const cachedResult = this.simulationCache.get(cacheKey)
-      if (cachedResult) {
-        this.log('info', 'Simulation result retrieved from cache')
-        return cachedResult
+    return this.telemetry.trace('simulate', { 'rpc.url': Array.isArray(this.config.rpcUrl) ? this.config.rpcUrl[0] : this.config.rpcUrl }, async (span) => {
+      // Check cache first if enabled
+      if (this.simulationCache) {
+        const cacheKey = SimulationCache.generateKey(txXDR, source)
+        const cachedResult = this.simulationCache.get(cacheKey)
+        if (cachedResult) {
+          this.log('debug', 'Simulation result retrieved from cache')
+          span.setAttribute('cache.hit', true)
+          return cachedResult
+        }
       }
-    }
 
-    let tx: ReturnType<typeof TransactionBuilder.fromXDR>
-    try {
-      tx = TransactionBuilder.fromXDR(txXDR, this.config.networkPassphrase)
-    } catch (err) {
-      throw new SorobanResurrectError(
-        'Invalid transaction XDR',
-        'INVALID_XDR',
-        err,
-        { rpcUrl: this.config.rpcUrl },
-      )
-    }
+      let tx: ReturnType<typeof TransactionBuilder.fromXDR>
+      try {
+        tx = TransactionBuilder.fromXDR(txXDR, this.config.networkPassphrase)
+      } catch (err) {
+        throw new SorobanResurrectError(
+          'Invalid transaction XDR',
+          'INVALID_XDR',
+          err,
+          { rpcUrl: this.config.rpcUrl },
+        )
+      }
 
-    let innerTx = tx
-    let feeBumpMetadata: FeeBumpMetadata = { isFeeBump: false }
+      let innerTx = tx
+      let feeBumpMetadata: FeeBumpMetadata = { isFeeBump: false }
 
-    if (isFeeBumpTx(tx)) {
-      throw new SorobanResurrectError(
-        'Fee bump transactions are not supported',
-        'INVALID_XDR',
-        undefined,
-        { rpcUrl: this.config.rpcUrl },
-      )
-    }
+      if (isFeeBumpTx(tx)) {
+        throw new SorobanResurrectError(
+          'Fee bump transactions are not supported',
+          'INVALID_XDR',
+          undefined,
+          { rpcUrl: this.config.rpcUrl },
+        )
+      }
 
     let simResult: SorobanRpc.Api.SimulateTransactionResponse
     try {
@@ -342,42 +346,48 @@ export class SorobanResurrect {
       )
     }
 
-    if (SorobanRpc.Api.isSimulationError(simResult)) {
-      throw new SorobanResurrectError(
-        `Simulation error (rpcUrl=${this.config.rpcUrl}): ${simResult.error}`,
-        'SIMULATION_FAILED',
-        simResult,
-        { rpcUrl: this.config.rpcUrl },
-      )
-    }
-
-    let footprint: xdr.LedgerFootprint | null = null
-
-    if (SorobanRpc.Api.isSimulationSuccess(simResult)) {
-      footprint = simResult.transactionData.getFootprint()
-    }
-
-    if (!footprint) {
-      const sorobanData = (innerTx as any).sorobanData as xdr.SorobanTransactionData | undefined
-      if (sorobanData) {
-        footprint = sorobanData.resources().footprint()
+      if (SorobanRpc.Api.isSimulationError(simResult)) {
+        this.sdkMetrics?.recordRpcError('simulation')
+        throw new SorobanResurrectError(
+          `Simulation error (rpcUrl=${this.config.rpcUrl}): ${simResult.error}`,
+          'SIMULATION_FAILED',
+          simResult,
+          { rpcUrl: this.config.rpcUrl },
+        )
       }
-    }
 
-    if (!footprint) {
-      return { needsRestoration: false, archivedKeys: [], totalKeysInFootprint: 0 }
-    }
+      let footprint: xdr.LedgerFootprint | null = null
 
-    const keys = extractKeysFromFootprint(footprint)
-    const result = await this.detectArchivedKeys(keys, source)
+      if (SorobanRpc.Api.isSimulationSuccess(simResult)) {
+        footprint = simResult.transactionData.getFootprint()
+      }
 
-    // Cache the result if caching is enabled
-    if (this.simulationCache) {
-      const cacheKey = SimulationCache.generateKey(txXDR, source)
-      this.simulationCache.set(cacheKey, result)
-    }
+      if (!footprint) {
+        const sorobanData = (innerTx as any).sorobanData as xdr.SorobanTransactionData | undefined
+        if (sorobanData) {
+          footprint = sorobanData.resources().footprint()
+        }
+      }
 
-    return result
+      if (!footprint) {
+        span.setAttribute('key.count', 0)
+        return { needsRestoration: false, archivedKeys: [], totalKeysInFootprint: 0 }
+      }
+
+      const keys = extractKeysFromFootprint(footprint)
+      const result = await this.detectArchivedKeys(keys, source)
+
+      span.setAttribute('key.count', result.totalKeysInFootprint)
+      span.setAttribute('success', result.needsRestoration ? 'needs_restore' : 'ok')
+
+      // Cache the result if caching is enabled
+      if (this.simulationCache) {
+        const cacheKey = SimulationCache.generateKey(txXDR, source)
+        this.simulationCache.set(cacheKey, result)
+      }
+
+      return result
+    })
   }
 
   private async detectArchivedKeys(
@@ -388,51 +398,57 @@ export class SorobanResurrect {
       return { needsRestoration: false, archivedKeys: [], totalKeysInFootprint: 0 }
     }
 
-    let existingKeys: SorobanRpc.Api.GetLedgerEntriesResponse
-    try {
-      existingKeys = await this.retryOnFailure(
-        () => this.getServer().getLedgerEntries(...keys.all),
-        'getLedgerEntries',
-      )
-    } catch (err) {
-      // On error, classify lazily only for the error context
-      const keyContext = keys.all.map(k => ({
-        keyBase64: encodeLedgerKey(k),
-        keyType: 'unknown' as const,
-      }))
-      throw new SorobanResurrectError(
-        `Failed to query ${keys.all.length} ledger entries (rpcUrl=${this.config.rpcUrl}): ${err instanceof Error ? err.message : String(err)}`,
-        'ARCHIVE_DETECTION_FAILED',
-        err,
-        { rpcUrl: this.config.rpcUrl, archivedKeys: keyContext },
-      )
-    }
-
-    const existingEntries = new Set<string>()
-    for (const entry of existingKeys.entries) {
-      existingEntries.add(encodeLedgerKey(entry.key))
-    }
-
-    const archivedKeys: ArchivedKey[] = []
-    for (const key of keys.all) {
-      const encoded = encodeLedgerKey(key)
-      if (!existingEntries.has(encoded)) {
-        // Store keys without classification — classification is deferred
-        // until buildRestoreTransaction or the caller explicitly classifies.
-        archivedKeys.push({
-          key,
-          keyBase64: encoded,
-          keyType: 'unknown',
-          restorePriority: 3,
-        })
+    return this.telemetry.trace('detect-archived', { 'key.count': keys.all.length }, async (span) => {
+      let existingKeys: SorobanRpc.Api.GetLedgerEntriesResponse
+      try {
+        existingKeys = await this.retryOnFailure(
+          () => this.getServer().getLedgerEntries(...keys.all),
+          'getLedgerEntries',
+        )
+      } catch (err) {
+        this.sdkMetrics?.recordRpcError('network')
+        // On error, classify lazily only for the error context
+        const keyContext = keys.all.map(k => ({
+          keyBase64: encodeLedgerKey(k),
+          keyType: 'unknown' as const,
+        }))
+        throw new SorobanResurrectError(
+          `Failed to query ${keys.all.length} ledger entries (rpcUrl=${this.config.rpcUrl}): ${err instanceof Error ? err.message : String(err)}`,
+          'ARCHIVE_DETECTION_FAILED',
+          err,
+          { rpcUrl: this.config.rpcUrl, archivedKeys: keyContext },
+        )
       }
-    }
 
-    return {
-      needsRestoration: archivedKeys.length > 0,
-      archivedKeys,
-      totalKeysInFootprint: keys.all.length,
-    }
+      const existingEntries = new Set<string>()
+      for (const entry of existingKeys.entries) {
+        existingEntries.add(encodeLedgerKey(entry.key))
+      }
+
+      const archivedKeys: ArchivedKey[] = []
+      for (const key of keys.all) {
+        const encoded = encodeLedgerKey(key)
+        if (!existingEntries.has(encoded)) {
+          // Store keys without classification — classification is deferred
+          // until buildRestoreTransaction or the caller explicitly classifies.
+          archivedKeys.push({
+            key,
+            keyBase64: encoded,
+            keyType: 'unknown',
+            restorePriority: 3,
+          })
+        }
+      }
+
+      span.setAttribute('key.count', archivedKeys.length)
+      span.setAttribute('success', archivedKeys.length === 0 ? 'no_archived' : 'archived_detected')
+
+      return {
+        needsRestoration: archivedKeys.length > 0,
+        archivedKeys,
+        totalKeysInFootprint: keys.all.length,
+      }
+    })
   }
 
   async checkTransaction(txXDR: string, source?: string): Promise<SimulationCheckResult> {
@@ -608,25 +624,28 @@ export class SorobanResurrect {
       )
     }
 
-    // Classify keys on demand before batch building (deferred from simulation)
-    const classified = classifyDeferredKeys(
-      archivedKeys.map(k => ({ key: k.key, keyBase64: k.keyBase64 })),
-    )
+    return this.telemetry.trace('build-restore', { 'key.count': archivedKeys.length }, async (span) => {
+      // Classify keys on demand before batch building (deferred from simulation)
+      const classified = classifyDeferredKeys(
+        archivedKeys.map(k => ({ key: k.key, keyBase64: k.keyBase64 })),
+      )
 
-    const batches = this.batchKeys(classified)
+      const batches = this.batchKeys(classified)
+      span.setAttribute('batch.count', batches.length)
 
-    if (batches.length > 1) {
-      this.log('info', `Splitting restore into ${batches.length} batches (${archivedKeys.length} total keys)`)
-    }
+      if (batches.length > 1) {
+        this.log('info', `Splitting restore into ${batches.length} batches (${archivedKeys.length} total keys)`)
+      }
 
-    this.emit('restore:start', classified)
+      this.emit('restore:start', classified)
 
-    const result = await this.buildSingleRestoreTransaction(batches[0], sourceAccountID)
+      const result = await this.buildSingleRestoreTransaction(batches[0], sourceAccountID)
 
-    this.emit('restore:batch:complete', 0, batches.length)
-    this.emit('restore:complete', result)
+      this.emit('restore:batch:complete', 0, batches.length)
+      this.emit('restore:complete', result)
 
-    return result
+      return result
+    })
   }
 
   async buildRestoreTransactionBatches(
@@ -1270,110 +1289,123 @@ export class SorobanResurrect {
     originalXDR: string,
     signTransaction: (xdr: string) => Promise<string>,
   ): Promise<ExecutionResult> {
-    if (this.config.simulateOnly) {
-      this.log('info', 'simulateOnly mode: skipping transaction submission')
-      
-      let keysRestored = 0
+    const startTime = Date.now()
+    return this.telemetry.trace('submit-restore', {}, async (span) => {
+      if (this.config.simulateOnly) {
+        this.log('info', 'simulateOnly mode: skipping transaction submission')
+
+        let keysRestored = 0
+        try {
+          const restoreTx = TransactionBuilder.fromXDR(restoreXDR, this.config.networkPassphrase)
+          const sorobanRaw = 'sorobanData' in restoreTx ? (restoreTx as any).sorobanData : null
+          const sorobanDataSD = sorobanRaw as xdr.SorobanTransactionData | null
+          const resources = sorobanDataSD?.resources()
+          const footprint = resources?.footprint()
+          keysRestored = footprint ? extractKeysFromFootprint(footprint).all.length : 0
+        } catch {
+          this.log('warn', 'Could not parse restore transaction XDR for key counting')
+        }
+
+        span.setAttribute('success', 'simulate_only')
+        return {
+          success: true,
+          entriesRestored: keysRestored,
+          simulateOnly: true,
+        }
+      }
+
+      let restoreTxHash: string | undefined
+      let originalTxHash: string | undefined
+
+      // Parse original transaction to detect fee-bump
+      let originalTx: any
+      let isOriginalFeeBump = false
       try {
-        const restoreTx = TransactionBuilder.fromXDR(restoreXDR, this.config.networkPassphrase)
-        const sorobanRaw = 'sorobanData' in restoreTx ? (restoreTx as any).sorobanData : null
-        const sorobanDataSD = sorobanRaw as xdr.SorobanTransactionData | null
-        const resources = sorobanDataSD?.resources()
-        const footprint = resources?.footprint()
-        keysRestored = footprint ? extractKeysFromFootprint(footprint).all.length : 0
-      } catch {
-        this.log('warn', 'Could not parse restore transaction XDR for key counting')
-      }
-
-      return {
-        success: true,
-        entriesRestored: keysRestored,
-        simulateOnly: true,
-      }
-    }
-
-    let restoreTxHash: string | undefined
-    let originalTxHash: string | undefined
-
-    // Parse original transaction to detect fee-bump
-    let originalTx: any
-    let isOriginalFeeBump = false
-    try {
-      originalTx = TransactionBuilder.fromXDR(originalXDR, this.config.networkPassphrase)
-      isOriginalFeeBump = isFeeBumpTx(originalTx)
-      if (isOriginalFeeBump) {
-        this.log('info', 'Original transaction is a fee-bump, will re-wrap after restoration')
-      }
-    } catch (err) {
-      this.log('warn', `Could not parse original transaction for fee-bump detection: ${err instanceof Error ? err.message : String(err)}`)
-      // Continue without fee-bump detection
-    }
-
-    // Execute restore transaction
-    try {
-      this.log('info', 'Executing restore transaction')
-      restoreTxHash = await this.submitSignedTransaction(restoreXDR, signTransaction)
-      this.log('info', `Restore transaction confirmed: ${restoreTxHash}`)
-    } catch (err) {
-      throw new SorobanResurrectError(
-        `Restore transaction failed (rpcUrl=${this.config.rpcUrl}): ${err instanceof Error ? err.message : String(err)}`,
-        'RESTORE_FAILED',
-        err,
-        { rpcUrl: this.config.rpcUrl, txHash: restoreTxHash },
-      )
-      this.emit('error', resurrErr)
-      throw resurrErr
-    }
-
-    // Execute original transaction (may need to re-wrap if it was fee-bump)
-    let txToSubmit = originalXDR
-    if (isOriginalFeeBump) {
-      try {
-        const innerTx = extractInnerTransaction(originalTx)
-        const innerTxXDR = innerTx.toXDR()
-        txToSubmit = this.reWrapFeeBumpTransaction(innerTxXDR, originalTx)
-        this.log('info', 'Re-wrapped fee-bump transaction for submission')
+        originalTx = TransactionBuilder.fromXDR(originalXDR, this.config.networkPassphrase)
+        isOriginalFeeBump = isFeeBumpTx(originalTx)
+        if (isOriginalFeeBump) {
+          this.log('info', 'Original transaction is a fee-bump, will re-wrap after restoration')
+        }
       } catch (err) {
-        this.log('warn', `Failed to re-wrap fee-bump, attempting submission with original: ${err instanceof Error ? err.message : String(err)}`)
-        txToSubmit = originalXDR
+        this.log('warn', `Could not parse original transaction for fee-bump detection: ${err instanceof Error ? err.message : String(err)}`)
+        // Continue without fee-bump detection
       }
-    }
 
-    try {
-      this.log('info', 'Executing original transaction')
-      this.emit('original:start')
-      originalTxHash = await this.submitSignedTransaction(txToSubmit, signTransaction)
-      this.log('info', `Original transaction confirmed: ${originalTxHash}`)
-      this.emit('original:complete', originalTxHash)
-    } catch (err) {
-      throw new SorobanResurrectError(
-        `Original transaction failed after successful restore (rpcUrl=${this.config.rpcUrl}, restoreTxHash=${restoreTxHash}): ${err instanceof Error ? err.message : String(err)}`,
-        'ORIGINAL_TX_FAILED',
-        err,
-        { rpcUrl: this.config.rpcUrl, txHash: restoreTxHash },
-      )
-      this.emit('error', resurrErr)
-      throw resurrErr
-    }
+      // Execute restore transaction
+      try {
+        this.log('info', 'Executing restore transaction')
+        restoreTxHash = await this.submitSignedTransaction(restoreXDR, signTransaction)
+        this.log('info', `Restore transaction confirmed: ${restoreTxHash}`, { txHash: restoreTxHash })
+        span.setAttribute('restore.tx.hash', restoreTxHash)
+      } catch (err) {
+        this.sdkMetrics?.recordRestore('failure')
+        this.sdkMetrics?.recordRestoreDuration(Date.now() - startTime)
+        throw new SorobanResurrectError(
+          `Restore transaction failed (rpcUrl=${this.config.rpcUrl}): ${err instanceof Error ? err.message : String(err)}`,
+          'RESTORE_FAILED',
+          err,
+          { rpcUrl: this.config.rpcUrl, txHash: restoreTxHash },
+        )
+      }
 
-    let keysRestored = 0
-    try {
-      const restoreTx = TransactionBuilder.fromXDR(restoreXDR, this.config.networkPassphrase)
-      const sorobanRaw = 'sorobanData' in restoreTx ? (restoreTx as any).sorobanData : null
-      const sorobanDataSD = sorobanRaw as xdr.SorobanTransactionData | null
-      const resources = sorobanDataSD?.resources()
-      const footprint = resources?.footprint()
-      keysRestored = footprint ? extractKeysFromFootprint(footprint).all.length : 0
-    } catch {
-      this.log('warn', 'Could not parse restore transaction XDR for key counting')
-    }
+      // Execute original transaction (may need to re-wrap if it was fee-bump)
+      let txToSubmit = originalXDR
+      if (isOriginalFeeBump) {
+        try {
+          const innerTx = extractInnerTransaction(originalTx)
+          const innerTxXDR = innerTx.toXDR()
+          txToSubmit = this.reWrapFeeBumpTransaction(innerTxXDR, originalTx)
+          this.log('info', 'Re-wrapped fee-bump transaction for submission')
+        } catch (err) {
+          this.log('warn', `Failed to re-wrap fee-bump, attempting submission with original: ${err instanceof Error ? err.message : String(err)}`)
+          txToSubmit = originalXDR
+        }
+      }
 
-    return {
-      success: true,
-      restoreTxHash,
-      originalTxHash,
-      entriesRestored: keysRestored,
-    }
+      return this.telemetry.trace('submit-original', {}, async (origSpan) => {
+        try {
+          this.log('info', 'Executing original transaction')
+          this.emit('original:start')
+          originalTxHash = await this.submitSignedTransaction(txToSubmit, signTransaction)
+          this.log('info', `Original transaction confirmed: ${originalTxHash}`, { txHash: originalTxHash })
+          this.emit('original:complete', originalTxHash)
+          origSpan.setAttribute('success', 'true')
+        } catch (err) {
+          this.sdkMetrics?.recordRestore('failure')
+          this.sdkMetrics?.recordRestoreDuration(Date.now() - startTime)
+          throw new SorobanResurrectError(
+            `Original transaction failed after successful restore (rpcUrl=${this.config.rpcUrl}, restoreTxHash=${restoreTxHash}): ${err instanceof Error ? err.message : String(err)}`,
+            'ORIGINAL_TX_FAILED',
+            err,
+            { rpcUrl: this.config.rpcUrl, txHash: restoreTxHash },
+          )
+        }
+
+        let keysRestored = 0
+        try {
+          const restoreTx = TransactionBuilder.fromXDR(restoreXDR, this.config.networkPassphrase)
+          const sorobanRaw = 'sorobanData' in restoreTx ? (restoreTx as any).sorobanData : null
+          const sorobanDataSD = sorobanRaw as xdr.SorobanTransactionData | null
+          const resources = sorobanDataSD?.resources()
+          const footprint = resources?.footprint()
+          keysRestored = footprint ? extractKeysFromFootprint(footprint).all.length : 0
+        } catch {
+          this.log('warn', 'Could not parse restore transaction XDR for key counting')
+        }
+
+        this.sdkMetrics?.recordRestore('success')
+        this.sdkMetrics?.recordRestoreDuration(Date.now() - startTime)
+        this.sdkMetrics?.recordKeysRestored(keysRestored)
+        span.setAttribute('success', 'true')
+
+        return {
+          success: true,
+          restoreTxHash,
+          originalTxHash,
+          entriesRestored: keysRestored,
+        }
+      })
+    })
   }
 
   async executeRestoreThenOriginalBatches(
@@ -1831,22 +1863,30 @@ export class SorobanResurrect {
     simulationResult: SimulationCheckResult
     restoreTransactionXDR?: string
   }> {
-    const simulationResult = await this.simulate(txXDR, sourceAccountID)
+    return this.telemetry.trace('check-and-prepare', {}, async (span) => {
+      const simulationResult = await this.simulate(txXDR, sourceAccountID)
 
-    if (!simulationResult.needsRestoration) {
-      return { needsRestoration: false, simulationResult }
-    }
+      span.setAttribute('key.count', simulationResult.totalKeysInFootprint)
 
-    const restoreTx = await this.buildRestoreTransaction(
-      simulationResult.archivedKeys,
-      sourceAccountID,
-    )
+      if (!simulationResult.needsRestoration) {
+        span.setAttribute('success', 'no_restore_needed')
+        return { needsRestoration: false, simulationResult }
+      }
 
-    return {
-      needsRestoration: true,
-      simulationResult,
-      restoreTransactionXDR: restoreTx.transactionXDR,
-    }
+      const restoreTx = await this.buildRestoreTransaction(
+        simulationResult.archivedKeys,
+        sourceAccountID,
+      )
+
+      span.setAttribute('key.types', simulationResult.archivedKeys.map(k => k.keyType).join(','))
+      span.setAttribute('success', 'restore_prepared')
+
+      return {
+        needsRestoration: true,
+        simulationResult,
+        restoreTransactionXDR: restoreTx.transactionXDR,
+      }
+    })
   }
 
   /**
@@ -1854,6 +1894,33 @@ export class SorobanResurrect {
    * @param txXDR Transaction XDR to invalidate
    * @param source Optional source account
    */
+  /**
+   * Render all collected Prometheus metrics as a text-format string suitable
+   * for serving on a `/metrics` HTTP endpoint.
+   *
+   * Returns an empty string when metrics are not configured.
+   *
+   * @example
+   * ```ts
+   * const resurrect = new SorobanResurrect({ metrics: {} });
+   * // Serve metrics endpoint:
+   * res.setHeader('Content-Type', 'text/plain; version=0.0.4');
+   * res.end(resurrect.collectMetrics());
+   * ```
+   */
+  collectMetrics(): string {
+    return this.sdkMetrics?.collect() ?? ''
+  }
+
+  /**
+   * Expose the underlying MetricsRegistry for consumers who need direct
+   * access (e.g. to add custom metrics or integrate with a larger registry).
+   * Returns `undefined` when metrics are not configured.
+   */
+  get metricsRegistry() {
+    return this.sdkMetrics?.registry
+  }
+
   invalidateSimulationCache(txXDR?: string, source?: string): void {
     if (!this.simulationCache) {
       this.log('warn', 'Simulation cache is not enabled')
